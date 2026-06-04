@@ -104,9 +104,7 @@ void lora_system_init( const void* context )
     
     // Set the LR1121 to standby mode using the external oscillator
     lr11xx_system_set_standby(( void* ) context, LR11XX_SYSTEM_STANDBY_CFG_XOSC);
-    // Calibrate the image
-    lr11xx_system_calibrate_image(( void* ) context,0x6B,0x6E); // Calibrate for 430~440MHz
-    // lr11xx_system_calibrate_image(( void* ) context,0xD7,0xDB); // Calibrate for 863~870MHz
+    // Skip image calibration here; the older sub-GHz example values are not valid for 2.4 GHz operation.
     
     // Configure the regulator mode
     const lr11xx_system_reg_mode_t regulator = smtc_shield_lr11xx_common_get_reg_mode();

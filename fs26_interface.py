@@ -5,6 +5,7 @@ from dash.dependencies import Input, Output
 import plotly.graph_objs as go
 import threading
 from collections import deque
+import re
 import time
 import glob
 import os
@@ -21,31 +22,158 @@ telemetry_data = {
     'speed_kph': deque(maxlen=MAX_POINTS),
     'altitude': deque(maxlen=MAX_POINTS),
     'satellites': deque(maxlen=MAX_POINTS),
+    'rpm': deque(maxlen=MAX_POINTS),
+    'engine_temp': deque(maxlen=MAX_POINTS),
+    'tps': deque(maxlen=MAX_POINTS),
+    'oil_pressure': deque(maxlen=MAX_POINTS),
+    'fuel_pressure': deque(maxlen=MAX_POINTS),
+    'brake_pressure': deque(maxlen=MAX_POINTS),
+    'fuel_flow': deque(maxlen=MAX_POINTS),
+    'wheel_speed_fr': deque(maxlen=MAX_POINTS),
+    'wheel_speed_fl': deque(maxlen=MAX_POINTS),
+    'wheel_speed_rr': deque(maxlen=MAX_POINTS),
+    'wheel_speed_rl': deque(maxlen=MAX_POINTS),
+    'g_force_lateral': deque(maxlen=MAX_POINTS),
+    'heading': deque(maxlen=MAX_POINTS),
     'rssi': deque(maxlen=MAX_POINTS),
     'snr': deque(maxlen=MAX_POINTS),
+    'tx_count': deque(maxlen=MAX_POINTS),
+    'can_frame_count': deque(maxlen=MAX_POINTS),
     'timestamps': deque(maxlen=MAX_POINTS),
 }
-latest = {'lat': 0, 'lon': 0, 'speed': 0, 'alt': 0, 'sats': 0, 'fix': False, 'rssi': 0, 'snr': 0, 'tx_count': 0, 'rx_count': 0}
+latest = {
+    'lat': None,
+    'lon': None,
+    'speed': None,
+    'alt': None,
+    'sats': None,
+    'fix': None,
+    'rpm': None,
+    'engine_temp': None,
+    'tps': None,
+    'oil_pressure': None,
+    'fuel_pressure': None,
+    'brake_pressure': None,
+    'fuel_flow': None,
+    'wheel_speed_fr': None,
+    'wheel_speed_fl': None,
+    'wheel_speed_rr': None,
+    'wheel_speed_rl': None,
+    'g_force_lateral': None,
+    'heading': None,
+    'rssi': None,
+    'snr': None,
+    'tx_count': None,
+    'can_frame_count': None,
+    'rx_count': 0,
+}
 serial_status = {'connected': False, 'port': None, 'last_data': 0}
+
+
+def fmt_float(value, precision=1, suffix=''):
+    if value is None:
+        return '--'
+    return f"{value:.{precision}f}{suffix}"
+
+
+def fmt_int(value, suffix=''):
+    if value is None:
+        return '--'
+    return f"{int(value)}{suffix}"
+
+
+def fmt_bool(value):
+    if value is None:
+        return '--'
+    return 'Valid' if value else 'No Fix'
+
+
+def stat_row(label, value):
+    return html.Div([
+        html.Div(label, style={'color': '#8a93a6', 'fontSize': '0.85rem'}),
+        html.Div(value, style={'color': '#f5f7fb', 'fontSize': '1.05rem', 'fontWeight': '600'}),
+    ], style={'display': 'flex', 'justifyContent': 'space-between', 'gap': '1rem', 'padding': '0.35rem 0'})
+
+
+def section_card(title, rows):
+    return html.Div([
+        html.H3(title, style={'margin': '0 0 0.75rem 0', 'fontSize': '1rem', 'color': '#e9edf5'}),
+        html.Div(rows, role='list')
+    ], style={
+        'backgroundColor': '#161c29',
+        'border': '1px solid #273043',
+        'borderRadius': '12px',
+        'padding': '1rem',
+        'boxShadow': '0 4px 18px rgba(0, 0, 0, 0.2)',
+        'minWidth': '0',
+    })
+
+
+def parse_keyed_value(line, pattern, caster=float):
+    match = re.search(pattern, line)
+    if not match:
+        return None
+    return caster(match.group(1))
 
 def parse_serial_line(line):
     """Parse the formatted output from your receiver"""
     try:
-        if 'Position:' in line:
-            parts = line.split('Position:')[1].strip().split(',')
-            latest['lat'] = float(parts[0].strip())
-            latest['lon'] = float(parts[1].strip().split()[0])
-        elif 'Speed:' in line:
+        if 'GPS:' in line and 'GPS Spd:' not in line:
+            match = re.search(r'GPS:\s*([+-]?[0-9]*\.?[0-9]+),\s*([+-]?[0-9]*\.?[0-9]+)', line)
+            if match:
+                latest['lat'] = float(match.group(1))
+                latest['lon'] = float(match.group(2))
+        elif 'Position:' in line:
+            match = re.search(r'Position:\s*([+-]?[0-9]*\.?[0-9]+),\s*([+-]?[0-9]*\.?[0-9]+)', line)
+            if match:
+                latest['lat'] = float(match.group(1))
+                latest['lon'] = float(match.group(2))
+        elif 'GPS Spd:' in line:
+            match = re.search(r'GPS Spd:\s*([+-]?[0-9]*\.?[0-9]+)\s*kph\s*\|\s*Alt:\s*([+-]?[0-9]*\.?[0-9]+)\s*m\s*\|\s*Sat:\s*(\d+)\s*\|\s*Fix:\s*(Valid|No Fix)', line)
+            if match:
+                latest['speed'] = float(match.group(1))
+                latest['alt'] = float(match.group(2))
+                latest['sats'] = int(match.group(3))
+                latest['fix'] = match.group(4) == 'Valid'
+        elif 'Speed:' in line and 'GPS Spd:' not in line:
             latest['speed'] = float(line.split('Speed:')[1].strip().split()[0])
-        elif 'Altitude:' in line:
+        elif 'Altitude:' in line and 'GPS Spd:' not in line:
             latest['alt'] = float(line.split('Altitude:')[1].strip().split()[0])
         elif 'Satellites:' in line:
             latest['sats'] = int(line.split('Satellites:')[1].strip().split()[0])
         elif 'GPS Fix:' in line:
             latest['fix'] = 'Valid' in line
-        elif 'TX Count:' in line:
-            latest['tx_count'] = int(line.split('TX Count:')[1].strip().split()[0])
-        elif 'RSSI:' in line:
+        elif 'RPM:' in line and 'TPS:' in line:
+            match = re.search(r'RPM:\s*(\d+)\s*\|\s*TPS:\s*([+-]?[0-9]*\.?[0-9]+)%\s*\|\s*Eng:\s*([+-]?[0-9]*\.?[0-9]+)\s*C\s*\|\s*Oil:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar', line)
+            if match:
+                latest['rpm'] = int(match.group(1))
+                latest['tps'] = float(match.group(2))
+                latest['engine_temp'] = float(match.group(3))
+                latest['oil_pressure'] = float(match.group(4))
+        elif 'Fuel:' in line and 'Brake:' in line and 'Flow:' in line:
+            match = re.search(r'Fuel:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Brake:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Flow:\s*([+-]?[0-9]*\.?[0-9]+)\s*L/min', line)
+            if match:
+                latest['fuel_pressure'] = float(match.group(1))
+                latest['brake_pressure'] = float(match.group(2))
+                latest['fuel_flow'] = float(match.group(3))
+        elif 'Wheels FR/FL/RR/RL:' in line:
+            match = re.search(r'Wheels FR/FL/RR/RL:\s*(\d+)/(\d+)/(\d+)/(\d+)', line)
+            if match:
+                latest['wheel_speed_fr'] = int(match.group(1))
+                latest['wheel_speed_fl'] = int(match.group(2))
+                latest['wheel_speed_rr'] = int(match.group(3))
+                latest['wheel_speed_rl'] = int(match.group(4))
+        elif 'Lateral G:' in line and 'Heading:' in line:
+            match = re.search(r'Lateral G:\s*([+-]?[0-9]*\.?[0-9]+)\s*\|\s*Heading:\s*([+-]?[0-9]*\.?[0-9]+)\s*deg', line)
+            if match:
+                latest['g_force_lateral'] = float(match.group(1))
+                latest['heading'] = float(match.group(2))
+        elif 'TX Count:' in line and 'CAN Frames:' in line:
+            match = re.search(r'TX Count:\s*(\d+)\s*\|\s*CAN Frames:\s*(\d+)', line)
+            if match:
+                latest['tx_count'] = int(match.group(1))
+                latest['can_frame_count'] = int(match.group(2))
+        elif 'RSSI:' in line and 'SNR:' in line:
             parts = line.split('|')
             latest['rssi'] = int(parts[0].split('RSSI:')[1].strip().split()[0])
             latest['snr'] = int(parts[1].split('SNR:')[1].strip().split()[0])
@@ -60,8 +188,23 @@ def store_datapoint():
     telemetry_data['speed_kph'].append(latest['speed'])
     telemetry_data['altitude'].append(latest['alt'])
     telemetry_data['satellites'].append(latest['sats'])
+    telemetry_data['rpm'].append(latest['rpm'])
+    telemetry_data['engine_temp'].append(latest['engine_temp'])
+    telemetry_data['tps'].append(latest['tps'])
+    telemetry_data['oil_pressure'].append(latest['oil_pressure'])
+    telemetry_data['fuel_pressure'].append(latest['fuel_pressure'])
+    telemetry_data['brake_pressure'].append(latest['brake_pressure'])
+    telemetry_data['fuel_flow'].append(latest['fuel_flow'])
+    telemetry_data['wheel_speed_fr'].append(latest['wheel_speed_fr'])
+    telemetry_data['wheel_speed_fl'].append(latest['wheel_speed_fl'])
+    telemetry_data['wheel_speed_rr'].append(latest['wheel_speed_rr'])
+    telemetry_data['wheel_speed_rl'].append(latest['wheel_speed_rl'])
+    telemetry_data['g_force_lateral'].append(latest['g_force_lateral'])
+    telemetry_data['heading'].append(latest['heading'])
     telemetry_data['rssi'].append(latest['rssi'])
     telemetry_data['snr'].append(latest['snr'])
+    telemetry_data['tx_count'].append(latest['tx_count'])
+    telemetry_data['can_frame_count'].append(latest['can_frame_count'])
     telemetry_data['timestamps'].append(time.time())
     latest['rx_count'] = len(telemetry_data['timestamps'])
 
@@ -137,90 +280,130 @@ threading.Thread(target=serial_reader, daemon=True).start()
 app = dash.Dash(__name__)
 app.title = "FS26 Telemetry Dashboard"
 
-# Compact stat card style
-stat_card_style = {
-    'textAlign': 'center',
-    'padding': '8px 15px',
-    'backgroundColor': '#1a1a2e',
-    'borderRadius': '8px',
-    'minWidth': '120px',
+page_style = {
+    'backgroundColor': '#0f1320',
+    'minHeight': '100vh',
+    'fontFamily': '"Segoe UI", "Inter", sans-serif',
+    'color': '#f5f7fb',
+}
+
+header_style = {
+    'background': 'linear-gradient(180deg, #171d2d 0%, #121726 100%)',
+    'padding': '1.25rem 1.5rem',
+    'borderBottom': '1px solid #273043',
+}
+
+grid_style = {
+    'display': 'grid',
+    'gridTemplateColumns': 'repeat(auto-fit, minmax(250px, 1fr))',
+    'gap': '1rem',
+    'padding': '1rem 1rem 0 1rem',
 }
 
 app.layout = html.Div([
-    # Header - more compact
     html.Div([
-        html.H2("🏎️ FS26 GPS Telemetry", style={'textAlign': 'center', 'color': '#00d4ff', 'margin': '0'}),
-    ], style={'backgroundColor': '#1a1a2e', 'padding': '10px'}),
-    
-    # Live stats cards - COMPACT
+        html.H1("FS26 Telemetry Dashboard", style={'margin': '0', 'fontSize': '1.8rem'}),
+        html.Div("Combined GPS, CAN, and radio link status in one view.", style={'color': '#aab3c5', 'marginTop': '0.35rem'}),
+    ], style=header_style),
+
+    html.Div(id='status-display', style={
+        'padding': '0.75rem 1rem 0 1rem',
+        'color': '#d7dce7',
+        'fontSize': '0.95rem',
+    }),
+
     html.Div([
-        html.Div([
-            html.Span("Speed: ", style={'color': '#888', 'fontSize': '14px'}),
-            html.Span(id='speed-display', style={'color': '#00ff88', 'fontSize': '24px', 'fontWeight': 'bold'}),
-        ], style=stat_card_style),
-        html.Div([
-            html.Span("Alt: ", style={'color': '#888', 'fontSize': '14px'}),
-            html.Span(id='altitude-display', style={'color': '#ffaa00', 'fontSize': '24px', 'fontWeight': 'bold'}),
-        ], style=stat_card_style),
-        html.Div([
-            html.Span("Sats: ", style={'color': '#888', 'fontSize': '14px'}),
-            html.Span(id='sats-display', style={'color': '#00d4ff', 'fontSize': '24px', 'fontWeight': 'bold'}),
-        ], style=stat_card_style),
-        html.Div([
-            html.Span("RSSI: ", style={'color': '#888', 'fontSize': '14px'}),
-            html.Span(id='rssi-display', style={'color': '#ff6b6b', 'fontSize': '24px', 'fontWeight': 'bold'}),
-        ], style=stat_card_style),
-        html.Div([
-            html.Span("SNR: ", style={'color': '#888', 'fontSize': '14px'}),
-            html.Span(id='snr-display', style={'color': '#aa88ff', 'fontSize': '24px', 'fontWeight': 'bold'}),
-        ], style=stat_card_style),
-        html.Div(id='status-display', style={**stat_card_style, 'fontSize': '12px'}),
-    ], style={'display': 'flex', 'justifyContent': 'center', 'gap': '10px', 'padding': '10px', 'backgroundColor': '#16213e', 'flexWrap': 'wrap'}),
-    
-    # MAP - now much taller
+        html.Div(id='connection-card'),
+        html.Div(id='gps-card'),
+        html.Div(id='engine-card'),
+        html.Div(id='pressure-card'),
+        html.Div(id='wheel-card'),
+        html.Div(id='dynamics-card'),
+    ], style=grid_style),
+
     html.Div([
-        dcc.Graph(id='map-graph', style={'height': '55vh'}),  # More height for map
-    ], style={'padding': '10px', 'backgroundColor': '#0f0f23'}),
-    
-    # Graphs side by side
+        dcc.Graph(id='map-graph', style={'height': '52vh'}),
+    ], style={'padding': '1rem'}),
+
     html.Div([
-        dcc.Graph(id='speed-graph', style={'height': '25vh', 'width': '50%', 'display': 'inline-block'}),
-        dcc.Graph(id='signal-graph', style={'height': '25vh', 'width': '50%', 'display': 'inline-block'}),
-    ], style={'padding': '0 10px 10px 10px', 'backgroundColor': '#0f0f23'}),
-    
-    # Auto-refresh
+        dcc.Graph(id='speed-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
+        dcc.Graph(id='signal-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
+    ], style={'padding': '0 1rem 1rem 1rem'}),
+
     dcc.Interval(id='interval-component', interval=500, n_intervals=0),
-], style={'backgroundColor': '#0f0f23', 'minHeight': '100vh', 'fontFamily': 'monospace'})
+], style=page_style)
 
 @app.callback(
-    [Output('speed-display', 'children'),
-     Output('altitude-display', 'children'),
-     Output('sats-display', 'children'),
-     Output('rssi-display', 'children'),
-     Output('snr-display', 'children'),
-     Output('status-display', 'children'),
+    [Output('status-display', 'children'),
+     Output('connection-card', 'children'),
+     Output('gps-card', 'children'),
+     Output('engine-card', 'children'),
+     Output('pressure-card', 'children'),
+     Output('wheel-card', 'children'),
+     Output('dynamics-card', 'children'),
      Output('map-graph', 'figure'),
      Output('speed-graph', 'figure'),
      Output('signal-graph', 'figure')],
     [Input('interval-component', 'n_intervals')]
 )
 def update_dashboard(n):
-    # Stats
-    speed_text = f"{latest['speed']:.1f} kph"
-    alt_text = f"{latest['alt']:.1f} m"
-    sats_text = f"{latest['sats']} 🛰️"
-    rssi_text = f"{latest['rssi']} dBm"
-    snr_text = f"{latest['snr']} dB"
-    
     # Connection status
     if serial_status['connected']:
         age = time.time() - serial_status['last_data'] if serial_status['last_data'] else 999
         if age < 5:
-            status = html.Span([f"● {serial_status['port']} ", html.Span(f"RX:{latest['rx_count']}", style={'color': '#888'})], style={'color': '#00ff88'})
+            status = html.Span(
+                [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_count']}", style={'color': '#8a93a6'})],
+                style={'color': '#7ce38b'}
+            )
         else:
-            status = html.Span(f"● {serial_status['port']} (no data)", style={'color': '#ffaa00'})
+            status = html.Span(f"Connected to {serial_status['port']} but no fresh data", style={'color': '#f2c14e'})
     else:
-        status = html.Span("● Disconnected", style={'color': '#ff6b6b'})
+        status = html.Span("Disconnected", style={'color': '#ff7a7a'})
+
+    connection_card = section_card('Connection', [
+        stat_row('State', 'Connected' if serial_status['connected'] else 'Disconnected'),
+        stat_row('Port', serial_status['port'] or '--'),
+        stat_row('Last packet age', f"{time.time() - serial_status['last_data']:.1f}s" if serial_status['last_data'] else '--'),
+        stat_row('RX packets', fmt_int(latest['rx_count'])),
+    ])
+
+    gps_card = section_card('GPS', [
+        stat_row('Latitude', fmt_float(latest['lat'], 6)),
+        stat_row('Longitude', fmt_float(latest['lon'], 6)),
+        stat_row('Speed', fmt_float(latest['speed'], 1, ' kph')),
+        stat_row('Altitude', fmt_float(latest['alt'], 1, ' m')),
+        stat_row('Satellites', fmt_int(latest['sats'])),
+        stat_row('Fix', fmt_bool(latest['fix'])),
+    ])
+
+    engine_card = section_card('Engine and drivetrain', [
+        stat_row('RPM', fmt_int(latest['rpm'])),
+        stat_row('Engine temp', fmt_float(latest['engine_temp'], 1, ' C')),
+        stat_row('Throttle position', fmt_float(latest['tps'], 1, ' %')),
+        stat_row('Fuel flow', fmt_float(latest['fuel_flow'], 2, ' L/min')),
+    ])
+
+    pressure_card = section_card('Pressures', [
+        stat_row('Oil pressure', fmt_float(latest['oil_pressure'], 2, ' bar')),
+        stat_row('Fuel pressure', fmt_float(latest['fuel_pressure'], 2, ' bar')),
+        stat_row('Brake pressure', fmt_float(latest['brake_pressure'], 2, ' bar')),
+    ])
+
+    wheel_card = section_card('Wheel speeds', [
+        stat_row('Front right', fmt_int(latest['wheel_speed_fr'], ' km/h')),
+        stat_row('Front left', fmt_int(latest['wheel_speed_fl'], ' km/h')),
+        stat_row('Rear right', fmt_int(latest['wheel_speed_rr'], ' km/h')),
+        stat_row('Rear left', fmt_int(latest['wheel_speed_rl'], ' km/h')),
+    ])
+
+    dynamics_card = section_card('Dynamics and radio', [
+        stat_row('Lateral G', fmt_float(latest['g_force_lateral'], 2)),
+        stat_row('Heading', fmt_float(latest['heading'], 1, ' deg')),
+        stat_row('TX count', fmt_int(latest['tx_count'])),
+        stat_row('CAN frames', fmt_int(latest['can_frame_count'])),
+        stat_row('RSSI', fmt_int(latest['rssi'], ' dBm')),
+        stat_row('SNR', fmt_int(latest['snr'], ' dB')),
+    ])
     
     # Map - using Scattermap (not deprecated Scattermapbox)
     lat_list = list(telemetry_data['latitude'])
@@ -294,7 +477,7 @@ def update_dashboard(n):
         uirevision='constant',
     )
     
-    return speed_text, alt_text, sats_text, rssi_text, snr_text, status, map_fig, speed_fig, signal_fig
+    return status, connection_card, gps_card, engine_card, pressure_card, wheel_card, dynamics_card, map_fig, speed_fig, signal_fig
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=8050)  # debug=False for production

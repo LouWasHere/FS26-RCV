@@ -48,8 +48,8 @@
 #define TX_OUTPUT_POWER_DBM 13 //-9~22
 #define PA_RAMP_TIME LR11XX_RADIO_RAMP_48_US
 #define FALLBACK_MODE LR11XX_RADIO_FALLBACK_STDBY_RC
-#define ENABLE_RX_BOOST_MODE false
-#define PAYLOAD_LENGTH 32
+#define ENABLE_RX_BOOST_MODE true
+#define PAYLOAD_LENGTH 128
 
 /*! 
  * @brief Modulation parameters for LoRa packets
