@@ -81,6 +81,21 @@ static uint32_t cad_done_count = 0;  // Channel Activity Detection without full 
  * --- PRIVATE FUNCTIONS -------------------------------------------------------
  */
 
+static void lora_hardware_reset(void) {
+    printf("[LORA] Executing physical hardware reset...\n");
+    gpio_init(RADIO_RESET);
+    gpio_set_dir(RADIO_RESET, GPIO_OUT);
+    
+    // Pull NRESET low to kill the silicon state
+    gpio_put(RADIO_RESET, 0);
+    sleep_ms(20);
+    // Bring it back high to boot
+    gpio_put(RADIO_RESET, 1);
+    
+    // Give the internal PLLs time to stabilize
+    sleep_ms(100); 
+}
+
 /**
  * @brief GPIO interrupt handler for LR1121 DIO
  */
@@ -126,7 +141,7 @@ static void lora_rx_init(void)
         LR11XX_SYSTEM_IRQ_RX_DONE | LR11XX_SYSTEM_IRQ_CRC_ERROR | 
         LR11XX_SYSTEM_IRQ_TIMEOUT | LR11XX_SYSTEM_IRQ_HEADER_ERROR,
         0));
-    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, LR11XX_SYSTEM_IRQ_ALL_MASK));
+    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, 0xFFFFFFFF));
 
     // Print any system error flags detected at init
     uint16_t sys_errors = 0;
@@ -152,7 +167,7 @@ static void lora_start_rx(void)
     ASSERT_LR11XX_RC(lr11xx_system_set_standby(&lr1121, LR11XX_SYSTEM_STANDBY_CFG_RC));
     
     // Clear any pending IRQs
-    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, LR11XX_SYSTEM_IRQ_ALL_MASK));
+    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, 0xFFFFFFFF));
     
     rx_done_flag = false;
     rx_error_flag = false;
@@ -212,6 +227,16 @@ static bool lora_receive(uint8_t* buffer, uint8_t max_length, uint8_t* received_
                             LR11XX_SYSTEM_IRQ_HEADER_ERROR)) {
                 rx_error_flag = true;
             }
+            break;
+        }
+
+        // If an IRQ fired but it wasn't expected, abort the wait.
+        if (irq_status != 0 && !(irq_status & LR11XX_SYSTEM_IRQ_PREAMBLE_DETECTED) 
+            && !(irq_status & LR11XX_SYSTEM_IRQ_SYNC_WORD_HEADER_VALID)) {
+            
+            printf("[LORA] Aborting RX wait due to unhandled error IRQ: 0x%08lX\n", (unsigned long)irq_status);
+            rx_done_flag = true;
+            rx_error_flag = true; 
             break;
         }
 
@@ -295,7 +320,7 @@ static bool lora_receive(uint8_t* buffer, uint8_t max_length, uint8_t* received_
     }
 
     // Clear all IRQs
-    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, LR11XX_SYSTEM_IRQ_ALL_MASK));
+    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, 0xFFFFFFFF));
     
     // Check for errors
     if (irq_status & LR11XX_SYSTEM_IRQ_CRC_ERROR) {
@@ -453,12 +478,16 @@ int main()
     printf("\n");
     
     // Main receive loop
+    int consecutive_errors = 0; // NEW: Watchdog counter
+
     while (true) {
         // Start listening
         lora_start_rx();
         
         // Wait for packet
         if (lora_receive(rx_buffer, sizeof(rx_buffer), &rx_length, &rssi, &snr)) {
+            consecutive_errors = 0; // Reset watchdog on a good packet!
+
             // Validate packet size against the combined telemetry payload
             if (rx_length >= sizeof(combined_telemetry_packet_t)) {
                 combined_telemetry_packet_t* packet = (combined_telemetry_packet_t*)rx_buffer;
@@ -467,21 +496,22 @@ int main()
                 if (packet->magic == TELEMETRY_MAGIC) {
                     display_telemetry(packet, rssi, snr);
                 } else {
-                    printf("[LORA] Invalid magic: 0x%08lX (expected 0x%08lX)\n", 
-                           (unsigned long)packet->magic, (unsigned long)TELEMETRY_MAGIC);
+                    printf("[LORA] Invalid magic...\n");
                 }
-            } else {
-                printf("[LORA] Packet too small: %d bytes (expected >= %lu)\n", 
-                       rx_length, (unsigned long)sizeof(combined_telemetry_packet_t));
-                
-                // Print hex dump for debugging
-                printf("[LORA] Hex dump: ");
-                for (int i = 0; i < rx_length && i < 32; i++) {
-                    printf("%02X ", rx_buffer[i]);
-                }
-                printf("\n");
-            }
+            } 
         } else {
+            consecutive_errors++;
+            sleep_ms(5); // Give USB stack breathing room
+
+            // The Self-Healing Trigger
+            if (consecutive_errors >= 4) {
+                printf("\n[FAULT] Radio state machine deadlocked. Watchdog triggered!\n");
+                
+                lora_hardware_reset(); // Nuke the silicon
+                lora_rx_init();        // Reconfigure the radio
+                
+                consecutive_errors = 0;
+            }
             // Print error statistics every 10 failures
             if (((header_error_count + crc_error_count + timeout_count) % 10) == 0 && 
                 (header_error_count + crc_error_count + timeout_count) > 0) {
