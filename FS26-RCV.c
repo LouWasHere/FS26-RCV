@@ -45,7 +45,7 @@ typedef struct __attribute__((packed)) {
     float    oil_pressure;   // 4 bytes - Bar
     float    fuel_pressure;  // 4 bytes - Bar
     float    brake_pressure; // 4 bytes - Bar
-    float    fuel_flow;      // 4 bytes - L/min
+    float    battery_voltage;// 4 bytes - V
 
     // CAN Data - Wheel Speeds
     uint16_t wheel_speed_fr; // 2 bytes - km/h
@@ -405,8 +405,8 @@ static void display_telemetry(const combined_telemetry_packet_t* packet, int8_t 
         packet->fix_valid ? "Valid" : "No Fix");
     printf("║  RPM: %u | TPS: %.1f%% | Eng: %.1f C | Oil: %.2f Bar ║\n",
         packet->rpm, packet->tps, packet->engine_temp, packet->oil_pressure);
-    printf("║  Fuel: %.2f Bar | Brake: %.2f Bar | Flow: %.2f L/min ║\n",
-        packet->fuel_pressure, packet->brake_pressure, packet->fuel_flow);
+    printf("║  Fuel: %.2f Bar | Brake: %.2f Bar | Volt: %.2f V ║\n",
+        packet->fuel_pressure, packet->brake_pressure, packet->battery_voltage);
     printf("║  Wheels FR/FL/RR/RL: %u/%u/%u/%u                 ║\n",
         packet->wheel_speed_fr, packet->wheel_speed_fl,
         packet->wheel_speed_rr, packet->wheel_speed_rl);

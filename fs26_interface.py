@@ -28,7 +28,7 @@ telemetry_data = {
     'oil_pressure': deque(maxlen=MAX_POINTS),
     'fuel_pressure': deque(maxlen=MAX_POINTS),
     'brake_pressure': deque(maxlen=MAX_POINTS),
-    'fuel_flow': deque(maxlen=MAX_POINTS),
+    'battery_voltage': deque(maxlen=MAX_POINTS),
     'wheel_speed_fr': deque(maxlen=MAX_POINTS),
     'wheel_speed_fl': deque(maxlen=MAX_POINTS),
     'wheel_speed_rr': deque(maxlen=MAX_POINTS),
@@ -54,7 +54,7 @@ latest = {
     'oil_pressure': None,
     'fuel_pressure': None,
     'brake_pressure': None,
-    'fuel_flow': None,
+    'battery_voltage': None,
     'wheel_speed_fr': None,
     'wheel_speed_fl': None,
     'wheel_speed_rr': None,
@@ -150,12 +150,12 @@ def parse_serial_line(line):
                 latest['tps'] = float(match.group(2))
                 latest['engine_temp'] = float(match.group(3))
                 latest['oil_pressure'] = float(match.group(4))
-        elif 'Fuel:' in line and 'Brake:' in line and 'Flow:' in line:
-            match = re.search(r'Fuel:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Brake:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Flow:\s*([+-]?[0-9]*\.?[0-9]+)\s*L/min', line)
+        elif 'Fuel:' in line and 'Brake:' in line:
+            match = re.search(r'Fuel:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Brake:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Voltage:\s*([+-]?[0-9]*\.?[0-9]+)\s*V', line)
             if match:
                 latest['fuel_pressure'] = float(match.group(1))
                 latest['brake_pressure'] = float(match.group(2))
-                latest['fuel_flow'] = float(match.group(3))
+                latest['battery_voltage'] = float(match.group(3))
         elif 'Wheels FR/FL/RR/RL:' in line:
             match = re.search(r'Wheels FR/FL/RR/RL:\s*(\d+)/(\d+)/(\d+)/(\d+)', line)
             if match:
@@ -194,7 +194,7 @@ def store_datapoint():
     telemetry_data['oil_pressure'].append(latest['oil_pressure'])
     telemetry_data['fuel_pressure'].append(latest['fuel_pressure'])
     telemetry_data['brake_pressure'].append(latest['brake_pressure'])
-    telemetry_data['fuel_flow'].append(latest['fuel_flow'])
+    telemetry_data['battery_voltage'].append(latest['battery_voltage'])
     telemetry_data['wheel_speed_fr'].append(latest['wheel_speed_fr'])
     telemetry_data['wheel_speed_fl'].append(latest['wheel_speed_fl'])
     telemetry_data['wheel_speed_rr'].append(latest['wheel_speed_rr'])
@@ -380,7 +380,7 @@ def update_dashboard(n):
         stat_row('RPM', fmt_int(latest['rpm'])),
         stat_row('Engine temp', fmt_float(latest['engine_temp'], 1, ' C')),
         stat_row('Throttle position', fmt_float(latest['tps'], 1, ' %')),
-        stat_row('Fuel flow', fmt_float(latest['fuel_flow'], 2, ' L/min')),
+        stat_row('Battery voltage', fmt_float(latest['battery_voltage'], 2, ' V')),
     ])
 
     pressure_card = section_card('Pressures', [
