@@ -5,6 +5,7 @@ from dash.dependencies import Input, Output
 import plotly.graph_objs as go
 import threading
 from collections import deque
+import math
 import re
 import time
 import glob
@@ -66,8 +67,11 @@ latest = {
     'tx_count': None,
     'can_frame_count': None,
     'rx_count': 0,
+    'rx_total': 0,
 }
 serial_status = {'connected': False, 'port': None, 'last_data': 0}
+
+MAX_GPS_JUMP_KM = 5.0
 
 
 def fmt_float(value, precision=1, suffix=''):
@@ -115,19 +119,53 @@ def parse_keyed_value(line, pattern, caster=float):
         return None
     return caster(match.group(1))
 
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    radius_km = 6371.0
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
+    return 2 * radius_km * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def gps_reading_is_plausible(lat, lon):
+    if lat is None or lon is None:
+        return False
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return False
+    if lat == 0 and lon == 0:
+        return False
+
+    previous_lat = latest['lat']
+    previous_lon = latest['lon']
+    if previous_lat is None or previous_lon is None:
+        return True
+
+    return haversine_km(previous_lat, previous_lon, lat, lon) <= MAX_GPS_JUMP_KM
+
 def parse_serial_line(line):
     """Parse the formatted output from your receiver"""
     try:
         if 'GPS:' in line and 'GPS Spd:' not in line:
             match = re.search(r'GPS:\s*([+-]?[0-9]*\.?[0-9]+),\s*([+-]?[0-9]*\.?[0-9]+)', line)
             if match:
-                latest['lat'] = float(match.group(1))
-                latest['lon'] = float(match.group(2))
+                candidate_lat = float(match.group(1))
+                candidate_lon = float(match.group(2))
+                if gps_reading_is_plausible(candidate_lat, candidate_lon):
+                    latest['lat'] = candidate_lat
+                    latest['lon'] = candidate_lon
         elif 'Position:' in line:
             match = re.search(r'Position:\s*([+-]?[0-9]*\.?[0-9]+),\s*([+-]?[0-9]*\.?[0-9]+)', line)
             if match:
-                latest['lat'] = float(match.group(1))
-                latest['lon'] = float(match.group(2))
+                candidate_lat = float(match.group(1))
+                candidate_lon = float(match.group(2))
+                if gps_reading_is_plausible(candidate_lat, candidate_lon):
+                    latest['lat'] = candidate_lat
+                    latest['lon'] = candidate_lon
         elif 'GPS Spd:' in line:
             match = re.search(r'GPS Spd:\s*([+-]?[0-9]*\.?[0-9]+)\s*kph\s*\|\s*Alt:\s*([+-]?[0-9]*\.?[0-9]+)\s*m\s*\|\s*Sat:\s*(\d+)\s*\|\s*Fix:\s*(Valid|No Fix)', line)
             if match:
@@ -151,7 +189,7 @@ def parse_serial_line(line):
                 latest['engine_temp'] = float(match.group(3))
                 latest['oil_pressure'] = float(match.group(4))
         elif 'Fuel:' in line and 'Brake:' in line:
-            match = re.search(r'Fuel:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Brake:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Voltage:\s*([+-]?[0-9]*\.?[0-9]+)\s*V', line)
+            match = re.search(r'Fuel:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*Brake:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar\s*\|\s*(?:Volt|Voltage):\s*([+-]?[0-9]*\.?[0-9]+)\s*V', line)
             if match:
                 latest['fuel_pressure'] = float(match.group(1))
                 latest['brake_pressure'] = float(match.group(2))
@@ -207,6 +245,7 @@ def store_datapoint():
     telemetry_data['can_frame_count'].append(latest['can_frame_count'])
     telemetry_data['timestamps'].append(time.time())
     latest['rx_count'] = len(telemetry_data['timestamps'])
+    latest['rx_total'] += 1
 
 def find_serial_port():
     """Find available Pico serial port"""
@@ -352,7 +391,7 @@ def update_dashboard(n):
         age = time.time() - serial_status['last_data'] if serial_status['last_data'] else 999
         if age < 5:
             status = html.Span(
-                [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_count']}", style={'color': '#8a93a6'})],
+                [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_total']}", style={'color': '#8a93a6'})],
                 style={'color': '#7ce38b'}
             )
         else:
@@ -364,7 +403,8 @@ def update_dashboard(n):
         stat_row('State', 'Connected' if serial_status['connected'] else 'Disconnected'),
         stat_row('Port', serial_status['port'] or '--'),
         stat_row('Last packet age', f"{time.time() - serial_status['last_data']:.1f}s" if serial_status['last_data'] else '--'),
-        stat_row('RX packets', fmt_int(latest['rx_count'])),
+        stat_row('RX packets', fmt_int(latest['rx_total'])),
+        stat_row('Buffered samples', fmt_int(latest['rx_count'])),
     ])
 
     gps_card = section_card('GPS', [
