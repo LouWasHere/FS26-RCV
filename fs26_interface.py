@@ -541,6 +541,18 @@ def start_replay(rows, filename=None):
         apply_sample(rows[0], count_rx_total=False, append_to_buffer=True)
         app_state['replay_index'] = 1
 
+
+def reset_replay_to_start():
+    if app_state['mode'] != 'replay':
+        return
+
+    app_state['replay_paused'] = True
+    app_state['replay_index'] = 0
+    reset_telemetry_buffers()
+    if app_state['replay_rows']:
+        apply_sample(app_state['replay_rows'][0], count_rx_total=False, append_to_buffer=True)
+        app_state['replay_index'] = 1
+
 # Dash App
 app = dash.Dash(__name__)
 app.title = "FS26 Telemetry Dashboard"
@@ -809,7 +821,10 @@ def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_s
             start_recording()
     elif triggered == 'play-toggle':
         if app_state['mode'] == 'replay' and app_state['replay_rows']:
-            app_state['replay_paused'] = False
+            if not app_state['replay_paused']:
+                reset_replay_to_start()
+            else:
+                app_state['replay_paused'] = False
     elif triggered == 'pause-toggle':
         if app_state['mode'] == 'replay' and app_state['replay_rows']:
             app_state['replay_paused'] = not app_state['replay_paused']
@@ -826,7 +841,7 @@ def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_s
         start_replay(rows, upload_filename)
 
     record_text = 'Stop recording' if app_state['recording'] else 'Record to CSV'
-    play_text = 'Playing' if (app_state['mode'] == 'replay' and not app_state['replay_paused']) else 'Play'
+    play_text = 'Stop/Reset' if (app_state['mode'] == 'replay' and app_state['replay_rows'] and not app_state['replay_paused']) else 'Play'
     pause_text = 'Resume' if (app_state['mode'] == 'replay' and app_state['replay_paused']) else 'Pause'
     speed_text = f"Speed: {app_state['replay_speed']}x"
     replay_text = control_text() if app_state['mode'] == 'replay' else 'No replay loaded'
