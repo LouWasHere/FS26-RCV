@@ -100,7 +100,8 @@ latest = {
     'rx_count': 0,
     'rx_total': 0,
 }
-serial_status = {'connected': False, 'port': None, 'last_data': 0}
+serial_status = {'connected': False, 'port': None, 'last_packet_at': 0}
+serial_status['last_packet_received_at'] = None
 app_state = {
     'mode': 'live',
     'recording': False,
@@ -417,7 +418,6 @@ def parse_serial_line(line):
             parts = line.split('|')
             latest['rssi'] = int(parts[0].split('RSSI:')[1].strip().split()[0])
             latest['snr'] = int(parts[1].split('SNR:')[1].strip().split()[0])
-            serial_status['last_data'] = time.time()
             store_datapoint()
     except Exception as e:
         pass
@@ -425,6 +425,8 @@ def parse_serial_line(line):
 def store_datapoint():
     sample = snapshot_latest()
     apply_sample(sample, count_rx_total=True, append_to_buffer=True)
+    serial_status['last_packet_at'] = time.monotonic()
+    serial_status['last_packet_received_at'] = datetime.now()
     write_recording_row(sample)
 
 def find_serial_port():
@@ -554,7 +556,7 @@ def reset_replay_to_start():
         app_state['replay_index'] = 1
 
 # Dash App
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, update_title=None)
 app.title = "FS26 Telemetry Dashboard"
 
 page_style = {
@@ -642,7 +644,7 @@ app.layout = html.Div([
         dcc.Graph(id='signal-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
     ], style={'padding': '0 1rem 1rem 1rem'}),
 
-    dcc.Interval(id='interval-component', interval=1000, n_intervals=0),
+    dcc.Interval(id='interval-component', interval=250, n_intervals=0),
 ], style=page_style)
 
 @app.callback(
@@ -663,7 +665,7 @@ def update_dashboard(n):
 
     # Connection status
     if serial_status['connected']:
-        age = time.time() - serial_status['last_data'] if serial_status['last_data'] else 999
+        age = time.monotonic() - serial_status['last_packet_at'] if serial_status['last_packet_at'] else 999
         if age < 5:
             status = html.Span(
                 [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_total']}", style={'color': '#8a93a6'}), html.Span(f" | {control_text()}", style={'color': '#aab3c5'})],
@@ -677,7 +679,7 @@ def update_dashboard(n):
     connection_card = section_card('Connection', [
         stat_row('State', 'Connected' if serial_status['connected'] else 'Disconnected'),
         stat_row('Port', serial_status['port'] or '--'),
-        stat_row('Last packet age', f"{time.time() - serial_status['last_data']:.1f}s" if serial_status['last_data'] else '--'),
+        stat_row('Packet received at', serial_status['last_packet_received_at'].strftime('%H:%M:%S') if serial_status['last_packet_received_at'] else '--'),
         stat_row('RX packets', fmt_int(latest['rx_total'])),
         stat_row('Buffered samples', fmt_int(latest['rx_count'])),
     ])
