@@ -1,10 +1,14 @@
+import base64
+import csv
+import io
 import serial
 import dash
 from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 import plotly.graph_objs as go
 import threading
 from collections import deque
+from datetime import datetime
 import math
 import re
 import time
@@ -17,6 +21,33 @@ BAUD_RATE = 115200
 
 # Data storage (thread-safe with deque)
 MAX_POINTS = 500
+RECORDINGS_DIR = 'recordings'
+TELEMETRY_FIELDS = [
+    'timestamp',
+    'lat',
+    'lon',
+    'speed',
+    'alt',
+    'sats',
+    'fix',
+    'rpm',
+    'engine_temp',
+    'tps',
+    'oil_pressure',
+    'fuel_pressure',
+    'brake_pressure',
+    'battery_voltage',
+    'wheel_speed_fr',
+    'wheel_speed_fl',
+    'wheel_speed_rr',
+    'wheel_speed_rl',
+    'g_force_lateral',
+    'heading',
+    'rssi',
+    'snr',
+    'tx_count',
+    'can_frame_count',
+]
 telemetry_data = {
     'latitude': deque(maxlen=MAX_POINTS),
     'longitude': deque(maxlen=MAX_POINTS),
@@ -70,6 +101,17 @@ latest = {
     'rx_total': 0,
 }
 serial_status = {'connected': False, 'port': None, 'last_data': 0}
+app_state = {
+    'mode': 'live',
+    'recording': False,
+    'recording_path': None,
+    'replay_rows': [],
+    'replay_index': 0,
+    'replay_paused': True,
+    'replay_speed': 1,
+    'replay_filename': None,
+}
+state_lock = threading.Lock()
 
 MAX_GPS_JUMP_KM = 5.0
 
@@ -147,8 +189,168 @@ def gps_reading_is_plausible(lat, lon):
 
     return haversine_km(previous_lat, previous_lon, lat, lon) <= MAX_GPS_JUMP_KM
 
+
+def ensure_recordings_dir():
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def make_recording_path():
+    ensure_recordings_dir()
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return os.path.join(RECORDINGS_DIR, f'telemetry_{stamp}.csv')
+
+
+def reset_telemetry_buffers():
+    for key in telemetry_data:
+        telemetry_data[key].clear()
+    latest['rx_count'] = 0
+
+
+def snapshot_latest(timestamp=None):
+    return {
+        'timestamp': timestamp if timestamp is not None else time.time(),
+        'lat': latest['lat'],
+        'lon': latest['lon'],
+        'speed': latest['speed'],
+        'alt': latest['alt'],
+        'sats': latest['sats'],
+        'fix': latest['fix'],
+        'rpm': latest['rpm'],
+        'engine_temp': latest['engine_temp'],
+        'tps': latest['tps'],
+        'oil_pressure': latest['oil_pressure'],
+        'fuel_pressure': latest['fuel_pressure'],
+        'brake_pressure': latest['brake_pressure'],
+        'battery_voltage': latest['battery_voltage'],
+        'wheel_speed_fr': latest['wheel_speed_fr'],
+        'wheel_speed_fl': latest['wheel_speed_fl'],
+        'wheel_speed_rr': latest['wheel_speed_rr'],
+        'wheel_speed_rl': latest['wheel_speed_rl'],
+        'g_force_lateral': latest['g_force_lateral'],
+        'heading': latest['heading'],
+        'rssi': latest['rssi'],
+        'snr': latest['snr'],
+        'tx_count': latest['tx_count'],
+        'can_frame_count': latest['can_frame_count'],
+    }
+
+
+def apply_sample(sample, count_rx_total=False, append_to_buffer=True):
+    latest['lat'] = sample.get('lat')
+    latest['lon'] = sample.get('lon')
+    latest['speed'] = sample.get('speed')
+    latest['alt'] = sample.get('alt')
+    latest['sats'] = sample.get('sats')
+    latest['fix'] = sample.get('fix')
+    latest['rpm'] = sample.get('rpm')
+    latest['engine_temp'] = sample.get('engine_temp')
+    latest['tps'] = sample.get('tps')
+    latest['oil_pressure'] = sample.get('oil_pressure')
+    latest['fuel_pressure'] = sample.get('fuel_pressure')
+    latest['brake_pressure'] = sample.get('brake_pressure')
+    latest['battery_voltage'] = sample.get('battery_voltage')
+    latest['wheel_speed_fr'] = sample.get('wheel_speed_fr')
+    latest['wheel_speed_fl'] = sample.get('wheel_speed_fl')
+    latest['wheel_speed_rr'] = sample.get('wheel_speed_rr')
+    latest['wheel_speed_rl'] = sample.get('wheel_speed_rl')
+    latest['g_force_lateral'] = sample.get('g_force_lateral')
+    latest['heading'] = sample.get('heading')
+    latest['rssi'] = sample.get('rssi')
+    latest['snr'] = sample.get('snr')
+    latest['tx_count'] = sample.get('tx_count')
+    latest['can_frame_count'] = sample.get('can_frame_count')
+
+    if append_to_buffer:
+        telemetry_data['latitude'].append(sample.get('lat'))
+        telemetry_data['longitude'].append(sample.get('lon'))
+        telemetry_data['speed_kph'].append(sample.get('speed'))
+        telemetry_data['altitude'].append(sample.get('alt'))
+        telemetry_data['satellites'].append(sample.get('sats'))
+        telemetry_data['rpm'].append(sample.get('rpm'))
+        telemetry_data['engine_temp'].append(sample.get('engine_temp'))
+        telemetry_data['tps'].append(sample.get('tps'))
+        telemetry_data['oil_pressure'].append(sample.get('oil_pressure'))
+        telemetry_data['fuel_pressure'].append(sample.get('fuel_pressure'))
+        telemetry_data['brake_pressure'].append(sample.get('brake_pressure'))
+        telemetry_data['battery_voltage'].append(sample.get('battery_voltage'))
+        telemetry_data['wheel_speed_fr'].append(sample.get('wheel_speed_fr'))
+        telemetry_data['wheel_speed_fl'].append(sample.get('wheel_speed_fl'))
+        telemetry_data['wheel_speed_rr'].append(sample.get('wheel_speed_rr'))
+        telemetry_data['wheel_speed_rl'].append(sample.get('wheel_speed_rl'))
+        telemetry_data['g_force_lateral'].append(sample.get('g_force_lateral'))
+        telemetry_data['heading'].append(sample.get('heading'))
+        telemetry_data['rssi'].append(sample.get('rssi'))
+        telemetry_data['snr'].append(sample.get('snr'))
+        telemetry_data['tx_count'].append(sample.get('tx_count'))
+        telemetry_data['can_frame_count'].append(sample.get('can_frame_count'))
+        telemetry_data['timestamps'].append(sample.get('timestamp'))
+        latest['rx_count'] = len(telemetry_data['timestamps'])
+
+    if count_rx_total:
+        latest['rx_total'] += 1
+
+
+def write_recording_row(sample):
+    if not app_state['recording'] or not app_state['recording_path']:
+        return
+
+    ensure_recordings_dir()
+    file_exists = os.path.exists(app_state['recording_path'])
+    with open(app_state['recording_path'], 'a', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=TELEMETRY_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(sample)
+
+
+def load_replay_csv(contents):
+    _, encoded = contents.split(',', 1)
+    data = base64.b64decode(encoded)
+    text = io.StringIO(data.decode('utf-8-sig'))
+    reader = csv.DictReader(text)
+    rows = []
+    for row in reader:
+        parsed = {}
+        for field in TELEMETRY_FIELDS:
+            value = row.get(field)
+            if value in (None, ''):
+                parsed[field] = None
+            elif field == 'timestamp':
+                parsed[field] = float(value)
+            elif field == 'fix':
+                parsed[field] = value.strip().lower() in ('1', 'true', 'valid', 'yes')
+            elif field in ('sats', 'rpm', 'wheel_speed_fr', 'wheel_speed_fl', 'wheel_speed_rr', 'wheel_speed_rl', 'rssi', 'snr', 'tx_count', 'can_frame_count'):
+                parsed[field] = int(float(value))
+            else:
+                parsed[field] = float(value)
+        rows.append(parsed)
+    return rows
+
+
+def replay_step():
+    if app_state['mode'] != 'replay' or app_state['replay_paused'] or not app_state['replay_rows']:
+        return
+
+    step = max(1, int(app_state['replay_speed']))
+    next_index = min(app_state['replay_index'] + step, len(app_state['replay_rows']))
+    if next_index <= app_state['replay_index']:
+        return
+
+    if app_state['replay_index'] == 0:
+        reset_telemetry_buffers()
+
+    for index in range(app_state['replay_index'], next_index):
+        apply_sample(app_state['replay_rows'][index], count_rx_total=False, append_to_buffer=True)
+
+    app_state['replay_index'] = next_index
+    if app_state['replay_index'] >= len(app_state['replay_rows']):
+        app_state['replay_paused'] = True
+
 def parse_serial_line(line):
     """Parse the formatted output from your receiver"""
+    if app_state['mode'] != 'live':
+        return
+
     try:
         if 'GPS:' in line and 'GPS Spd:' not in line:
             match = re.search(r'GPS:\s*([+-]?[0-9]*\.?[0-9]+),\s*([+-]?[0-9]*\.?[0-9]+)', line)
@@ -221,31 +423,9 @@ def parse_serial_line(line):
         pass
 
 def store_datapoint():
-    telemetry_data['latitude'].append(latest['lat'])
-    telemetry_data['longitude'].append(latest['lon'])
-    telemetry_data['speed_kph'].append(latest['speed'])
-    telemetry_data['altitude'].append(latest['alt'])
-    telemetry_data['satellites'].append(latest['sats'])
-    telemetry_data['rpm'].append(latest['rpm'])
-    telemetry_data['engine_temp'].append(latest['engine_temp'])
-    telemetry_data['tps'].append(latest['tps'])
-    telemetry_data['oil_pressure'].append(latest['oil_pressure'])
-    telemetry_data['fuel_pressure'].append(latest['fuel_pressure'])
-    telemetry_data['brake_pressure'].append(latest['brake_pressure'])
-    telemetry_data['battery_voltage'].append(latest['battery_voltage'])
-    telemetry_data['wheel_speed_fr'].append(latest['wheel_speed_fr'])
-    telemetry_data['wheel_speed_fl'].append(latest['wheel_speed_fl'])
-    telemetry_data['wheel_speed_rr'].append(latest['wheel_speed_rr'])
-    telemetry_data['wheel_speed_rl'].append(latest['wheel_speed_rl'])
-    telemetry_data['g_force_lateral'].append(latest['g_force_lateral'])
-    telemetry_data['heading'].append(latest['heading'])
-    telemetry_data['rssi'].append(latest['rssi'])
-    telemetry_data['snr'].append(latest['snr'])
-    telemetry_data['tx_count'].append(latest['tx_count'])
-    telemetry_data['can_frame_count'].append(latest['can_frame_count'])
-    telemetry_data['timestamps'].append(time.time())
-    latest['rx_count'] = len(telemetry_data['timestamps'])
-    latest['rx_total'] += 1
+    sample = snapshot_latest()
+    apply_sample(sample, count_rx_total=True, append_to_buffer=True)
+    write_recording_row(sample)
 
 def find_serial_port():
     """Find available Pico serial port"""
@@ -315,6 +495,52 @@ def serial_reader():
 # Start serial reader thread
 threading.Thread(target=serial_reader, daemon=True).start()
 
+
+def control_text():
+    if app_state['mode'] == 'replay' and app_state['replay_rows']:
+        total = len(app_state['replay_rows'])
+        position = min(app_state['replay_index'], total)
+        state = 'Paused' if app_state['replay_paused'] else 'Playing'
+        return f"Replay {state} {position}/{total} at {app_state['replay_speed']}x"
+
+    if app_state['recording']:
+        return f"Recording to {app_state['recording_path']}"
+
+    return 'Live telemetry'
+
+
+def set_live_mode():
+    app_state['mode'] = 'live'
+    app_state['replay_paused'] = True
+    app_state['replay_index'] = 0
+    app_state['replay_rows'] = []
+    app_state['replay_filename'] = None
+    reset_telemetry_buffers()
+
+
+def start_recording():
+    app_state['recording_path'] = make_recording_path()
+    app_state['recording'] = True
+
+
+def stop_recording():
+    app_state['recording'] = False
+    app_state['recording_path'] = None
+
+
+def start_replay(rows, filename=None):
+    stop_recording()
+    app_state['mode'] = 'replay'
+    app_state['replay_rows'] = rows
+    app_state['replay_index'] = 0
+    app_state['replay_paused'] = True
+    app_state['replay_speed'] = 1
+    app_state['replay_filename'] = filename
+    reset_telemetry_buffers()
+    if rows:
+        apply_sample(rows[0], count_rx_total=False, append_to_buffer=True)
+        app_state['replay_index'] = 1
+
 # Dash App
 app = dash.Dash(__name__)
 app.title = "FS26 Telemetry Dashboard"
@@ -339,6 +565,19 @@ grid_style = {
     'padding': '1rem 1rem 0 1rem',
 }
 
+control_button_style = {
+    'display': 'inline-flex',
+    'alignItems': 'center',
+    'justifyContent': 'center',
+    'padding': '0.55rem 0.9rem',
+    'border': '1px solid #273043',
+    'borderRadius': '8px',
+    'backgroundColor': '#1a2130',
+    'color': '#f5f7fb',
+    'cursor': 'pointer',
+    'fontSize': '0.95rem',
+}
+
 app.layout = html.Div([
     html.Div([
         html.H1("FS26 Telemetry Dashboard", style={'margin': '0', 'fontSize': '1.8rem'}),
@@ -361,6 +600,28 @@ app.layout = html.Div([
     ], style=grid_style),
 
     html.Div([
+        html.Div(id='replay-status', style={'color': '#aab3c5', 'fontSize': '0.95rem'}),
+        html.Div([
+            html.Button('Record to CSV', id='record-toggle', n_clicks=0, style=control_button_style),
+            html.Button('Play', id='play-toggle', n_clicks=0, style=control_button_style),
+            html.Button('Pause', id='pause-toggle', n_clicks=0, style=control_button_style),
+            html.Button('Fast-forward', id='ff-toggle', n_clicks=0, style=control_button_style),
+            html.Button('1x', id='reset-speed-toggle', n_clicks=0, style=control_button_style),
+            html.Button('Live', id='live-toggle', n_clicks=0, style=control_button_style),
+            dcc.Upload(
+                id='replay-upload',
+                children=html.Div('Load CSV'),
+                accept='.csv',
+                multiple=False,
+                style={
+                    **control_button_style,
+                },
+            ),
+            html.Span('Speed: 1x', id='speed-display', style={'color': '#8a93a6'}),
+        ], style={'display': 'flex', 'flexWrap': 'wrap', 'gap': '0.75rem', 'alignItems': 'center'}),
+    ], style={'padding': '0.75rem 1rem 0 1rem', 'display': 'grid', 'gap': '0.5rem'}),
+
+    html.Div([
         dcc.Graph(id='map-graph', style={'height': '52vh'}),
     ], style={'padding': '1rem'}),
 
@@ -369,7 +630,7 @@ app.layout = html.Div([
         dcc.Graph(id='signal-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
     ], style={'padding': '0 1rem 1rem 1rem'}),
 
-    dcc.Interval(id='interval-component', interval=500, n_intervals=0),
+    dcc.Interval(id='interval-component', interval=1000, n_intervals=0),
 ], style=page_style)
 
 @app.callback(
@@ -386,18 +647,20 @@ app.layout = html.Div([
     [Input('interval-component', 'n_intervals')]
 )
 def update_dashboard(n):
+    replay_step()
+
     # Connection status
     if serial_status['connected']:
         age = time.time() - serial_status['last_data'] if serial_status['last_data'] else 999
         if age < 5:
             status = html.Span(
-                [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_total']}", style={'color': '#8a93a6'})],
+                [f"Connected to {serial_status['port']} ", html.Span(f"RX packets: {latest['rx_total']}", style={'color': '#8a93a6'}), html.Span(f" | {control_text()}", style={'color': '#aab3c5'})],
                 style={'color': '#7ce38b'}
             )
         else:
-            status = html.Span(f"Connected to {serial_status['port']} but no fresh data", style={'color': '#f2c14e'})
+            status = html.Span([f"Connected to {serial_status['port']} but no fresh data ", html.Span(control_text(), style={'color': '#aab3c5'})], style={'color': '#f2c14e'})
     else:
-        status = html.Span("Disconnected", style={'color': '#ff7a7a'})
+        status = html.Span(["Disconnected ", html.Span(control_text(), style={'color': '#aab3c5'})], style={'color': '#ff7a7a'})
 
     connection_card = section_card('Connection', [
         stat_row('State', 'Connected' if serial_status['connected'] else 'Disconnected'),
@@ -518,6 +781,57 @@ def update_dashboard(n):
     )
     
     return status, connection_card, gps_card, engine_card, pressure_card, wheel_card, dynamics_card, map_fig, speed_fig, signal_fig
+
+
+@app.callback(
+    [Output('record-toggle', 'children'),
+     Output('play-toggle', 'children'),
+     Output('pause-toggle', 'children'),
+     Output('speed-display', 'children'),
+     Output('replay-status', 'children')],
+    [Input('record-toggle', 'n_clicks'),
+     Input('play-toggle', 'n_clicks'),
+     Input('pause-toggle', 'n_clicks'),
+     Input('ff-toggle', 'n_clicks'),
+     Input('reset-speed-toggle', 'n_clicks'),
+     Input('live-toggle', 'n_clicks'),
+     Input('replay-upload', 'contents')],
+    [State('replay-upload', 'filename')],
+    prevent_initial_call=True
+)
+def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_speed_clicks, live_clicks, upload_contents, upload_filename):
+    triggered = dash.callback_context.triggered[0]['prop_id'].split('.')[0]
+
+    if triggered == 'record-toggle':
+        if app_state['recording']:
+            stop_recording()
+        else:
+            start_recording()
+    elif triggered == 'play-toggle':
+        if app_state['mode'] == 'replay' and app_state['replay_rows']:
+            app_state['replay_paused'] = False
+    elif triggered == 'pause-toggle':
+        if app_state['mode'] == 'replay' and app_state['replay_rows']:
+            app_state['replay_paused'] = not app_state['replay_paused']
+    elif triggered == 'ff-toggle':
+        if app_state['mode'] == 'replay' and app_state['replay_rows']:
+            app_state['replay_speed'] = min(app_state['replay_speed'] * 2, 16)
+    elif triggered == 'reset-speed-toggle':
+        if app_state['mode'] == 'replay' and app_state['replay_rows']:
+            app_state['replay_speed'] = 1
+    elif triggered == 'live-toggle':
+        set_live_mode()
+    elif triggered == 'replay-upload' and upload_contents:
+        rows = load_replay_csv(upload_contents)
+        start_replay(rows, upload_filename)
+
+    record_text = 'Stop recording' if app_state['recording'] else 'Record to CSV'
+    play_text = 'Playing' if (app_state['mode'] == 'replay' and not app_state['replay_paused']) else 'Play'
+    pause_text = 'Resume' if (app_state['mode'] == 'replay' and app_state['replay_paused']) else 'Pause'
+    speed_text = f"Speed: {app_state['replay_speed']}x"
+    replay_text = control_text() if app_state['mode'] == 'replay' else 'No replay loaded'
+
+    return record_text, play_text, pause_text, speed_text, replay_text
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=8050)  # debug=False for production
