@@ -207,200 +207,96 @@ static void lora_start_rx(void)
  * @param snr Pointer to store SNR value (can be NULL)
  * @return true if packet received successfully, false on error/timeout
  */
+/**
+ * @brief Receive data over LoRa (blocking until packet received)
+ * 
+ * @param buffer Pointer to buffer to store received data
+ * @param max_length Maximum buffer size
+ * @param received_length Pointer to store actual received length
+ * @param rssi Pointer to store RSSI value (can be NULL)
+ * @param snr Pointer to store SNR value (can be NULL)
+ * @return true if packet received successfully, false on error/timeout
+ */
 static bool lora_receive(uint8_t* buffer, uint8_t max_length, uint8_t* received_length, 
                          int8_t* rssi, int8_t* snr)
 {
-    // Wait for RX to complete
     uint32_t poll_count = 0;
+    
     // Wait for RX to complete
     while (!rx_done_flag) {
-        // Check IRQ register directly as backup
         lr11xx_system_irq_mask_t irq_status;
         lr11xx_system_get_irq_status(&lr1121, &irq_status);
         
-        // Exit ONLY on terminal events: RX_DONE, CRC_ERROR, TIMEOUT, or HEADER_ERROR
-        if (irq_status & (LR11XX_SYSTEM_IRQ_RX_DONE | LR11XX_SYSTEM_IRQ_CRC_ERROR | 
-                        LR11XX_SYSTEM_IRQ_TIMEOUT | LR11XX_SYSTEM_IRQ_HEADER_ERROR)) {
-            rx_done_flag = true;
+        // --- THE SHIELD: Catch and silently discard 2.4GHz Wi-Fi/Bluetooth noise ---
+        if (irq_status & (LR11XX_SYSTEM_IRQ_HEADER_ERROR | LR11XX_SYSTEM_IRQ_CRC_ERROR)) {
             
-            if (irq_status & (LR11XX_SYSTEM_IRQ_CRC_ERROR | LR11XX_SYSTEM_IRQ_TIMEOUT | 
-                            LR11XX_SYSTEM_IRQ_HEADER_ERROR)) {
-                rx_error_flag = true;
-            }
+            if (irq_status & LR11XX_SYSTEM_IRQ_HEADER_ERROR) header_error_count++;
+            if (irq_status & LR11XX_SYSTEM_IRQ_CRC_ERROR) crc_error_count++;
+            
+            // Clear ONLY the error flags from the silicon
+            lr11xx_system_clear_irq_status(&lr1121, LR11XX_SYSTEM_IRQ_HEADER_ERROR | LR11XX_SYSTEM_IRQ_CRC_ERROR);
+            
+            // Tell the radio to immediately go back to continuous listening
+            lr11xx_radio_set_rx_with_timeout_in_rtc_step(&lr1121, RX_CONTINUOUS);
+            
+            // Reset safety timeout (the radio is alive, it's just processing background noise)
+            poll_count = 0; 
+            continue; 
+        }
+        // ---------------------------------------------------------------------------
+
+        // --- THE SUCCESS CONDITION: We got a full, valid packet ---
+        if (irq_status & LR11XX_SYSTEM_IRQ_RX_DONE) {
+            rx_done_flag = true;
+            rx_error_flag = false;
             break;
         }
-
-        // If an IRQ fired but it wasn't expected, abort the wait.
-        if (irq_status != 0 && !(irq_status & LR11XX_SYSTEM_IRQ_PREAMBLE_DETECTED) 
-            && !(irq_status & LR11XX_SYSTEM_IRQ_SYNC_WORD_HEADER_VALID)) {
-            
-            printf("[LORA] Aborting RX wait due to unhandled error IRQ: 0x%08lX\n", (unsigned long)irq_status);
+        
+        // --- THE FAIL CONDITION: A genuine timeout ---
+        if (irq_status & LR11XX_SYSTEM_IRQ_TIMEOUT) {
+            timeout_count++;
             rx_done_flag = true;
-            rx_error_flag = true; 
-            break;
+            rx_error_flag = true;
+            return false;
         }
 
-        // Periodic heartbeat while waiting: every ~1000 ms
+        // Periodic heartbeat while waiting (every ~1 second)
         poll_count++;
         if ((poll_count % 1000) == 0) {
             int8_t inst_rssi = 0;
-            lr11xx_system_get_irq_status(&lr1121, &irq_status);
             if (lr11xx_radio_get_rssi_inst(&lr1121, &inst_rssi) == LR11XX_STATUS_OK) {
-                printf("[LORA] Heartbeat [%lu.%lus]: IRQ=0x%08lX, RSSI=%d dBm\n", poll_count/1000, (poll_count%1000)/100, (unsigned long)irq_status, inst_rssi);
-            } else {
-                printf("[LORA] Heartbeat [%lu.%lus]: IRQ=0x%08lX, RSSI=(err)\n", poll_count/1000, (poll_count%1000)/100, (unsigned long)irq_status);
+                // Heartbeat print removed to keep terminal clean, but RSSI can be checked here
             }
         }
         
-        // Safety timeout: if stuck for 5 seconds, force exit
+        // Safety timeout: if stuck for 5 seconds without ANY radio events, force exit
         if (poll_count > 5000) {
-            printf("[LORA] Safety timeout after 5s (poll_count=%lu), forcing exit\n", poll_count);
+            printf("[LORA] Safety timeout after 5s, forcing exit\n");
             rx_done_flag = true;
             rx_error_flag = true;
-            break;
+            return false;
         }
 
         sleep_ms(1);
     }
     
-    // Get the IRQ status
-    lr11xx_system_irq_mask_t irq_status;
-    lr11xx_system_get_irq_status(&lr1121, &irq_status);
+    // Clear all IRQs for the next receive cycle
+    lr11xx_system_clear_irq_status(&lr1121, 0xFFFFFFFF);
     
-    // Debug: print raw IRQ status before clearing
-    printf("[LORA] IRQ status: 0x%08lX\n", (unsigned long)irq_status);
-    
-    // Decode individual IRQ flags
-    printf("[DEBUG] IRQ flags set:\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_PREAMBLE_DETECTED) printf("  - PREAMBLE_DETECTED\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_SYNC_WORD_HEADER_VALID) printf("  - SYNC_WORD_HEADER_VALID\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_HEADER_ERROR) printf("  - HEADER_ERROR\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_RX_DONE) printf("  - RX_DONE\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_CRC_ERROR) printf("  - CRC_ERROR\n");
-    if (irq_status & LR11XX_SYSTEM_IRQ_TIMEOUT) printf("  - TIMEOUT\n");
-    if (irq_status & 0x10) printf("  - CAD_DONE (0x10) - Preamble detected but packet RX failed\n");
-    if (irq_status == 0) printf("  - (no recognized flags)\n");
-    if ((irq_status & 0xFFFFFFE0) != 0) printf("  - Other unknown bits: 0x%08lX\n", (unsigned long)(irq_status & 0xFFFFFFE0));
-
-    // Extra handling: header / sync diagnostics
-    if (irq_status & LR11XX_SYSTEM_IRQ_PREAMBLE_DETECTED) {
-        printf("[LORA] Preamble detected\n");
-    }
-    if (irq_status & LR11XX_SYSTEM_IRQ_SYNC_WORD_HEADER_VALID) {
-        printf("[LORA] Sync word / header valid\n");
-    }
-    if (irq_status & LR11XX_SYSTEM_IRQ_HEADER_ERROR) {
-        header_error_count++;
-        printf("[LORA] Header error detected (total: %lu)\n", header_error_count);
-
-        // Dump RX buffer/header bytes for inspection
-        lr11xx_radio_rx_buffer_status_t rx_buffer_status;
-        if (lr11xx_radio_get_rx_buffer_status(&lr1121, &rx_buffer_status) == LR11XX_STATUS_OK) {
-            printf("[LORA] RX buffer on header error: payload_len=%u start=%u\n", rx_buffer_status.pld_len_in_bytes, rx_buffer_status.buffer_start_pointer);
-            uint8_t dump_len = rx_buffer_status.pld_len_in_bytes > 32 ? 32 : rx_buffer_status.pld_len_in_bytes;
-            if (dump_len > 0) {
-                uint8_t tmp[32];
-                if (lr11xx_regmem_read_buffer8(&lr1121, tmp, rx_buffer_status.buffer_start_pointer, dump_len) == LR11XX_STATUS_OK) {
-                    printf("[LORA] Header error dump: ");
-                    for (uint8_t i = 0; i < dump_len; i++) printf("%02X ", tmp[i]);
-                    printf("\n");
-                }
-            }
-        }
-        
-        // Check system errors
-        uint16_t sys_errors = 0;
-        if (lr11xx_system_get_errors(&lr1121, &sys_errors) == LR11XX_STATUS_OK) {
-            if (sys_errors != 0) {
-                printf("[LORA] System errors on header error: 0x%04X\n", sys_errors);
-            }
-        }
-        
-        return false;
-    }
-
-    // Clear all IRQs
-    ASSERT_LR11XX_RC(lr11xx_system_clear_irq_status(&lr1121, 0xFFFFFFFF));
-    
-    // Check for errors
-    if (irq_status & LR11XX_SYSTEM_IRQ_CRC_ERROR) {
-        crc_error_count++;
-        printf("[LORA] CRC error (total: %lu)\n", crc_error_count);
-
-        // Dump system error flags and RX buffer contents for debugging
-        uint16_t sys_errors = 0;
-        if (lr11xx_system_get_errors(&lr1121, &sys_errors) == LR11XX_STATUS_OK) {
-            printf("[LORA] System errors: 0x%04X\n", sys_errors);
-        }
-
-        lr11xx_radio_rx_buffer_status_t rx_buffer_status;
-        if (lr11xx_radio_get_rx_buffer_status(&lr1121, &rx_buffer_status) == LR11XX_STATUS_OK) {
-            printf("[LORA] RX buffer: payload_len=%u start=%u\n", rx_buffer_status.pld_len_in_bytes, rx_buffer_status.buffer_start_pointer);
-            uint8_t dump_len = rx_buffer_status.pld_len_in_bytes > 32 ? 32 : rx_buffer_status.pld_len_in_bytes;
-            if (dump_len > 0) {
-                uint8_t tmp[32];
-                if (lr11xx_regmem_read_buffer8(&lr1121, tmp, rx_buffer_status.buffer_start_pointer, dump_len) == LR11XX_STATUS_OK) {
-                    printf("[LORA] RX dump: ");
-                    for (uint8_t i = 0; i < dump_len; i++) printf("%02X ", tmp[i]);
-                    printf("\n");
-                }
-            }
-        }
-        return false;
-    }
-    
-    if (irq_status & LR11XX_SYSTEM_IRQ_TIMEOUT) {
-        timeout_count++;
-        printf("[LORA] RX timeout (total: %lu)\n", timeout_count);
-
-        // On timeout, also read system errors and RSSI instant to see if any energy was detected
-        uint16_t sys_errors = 0;
-        if (lr11xx_system_get_errors(&lr1121, &sys_errors) == LR11XX_STATUS_OK) {
-            printf("[LORA] System errors: 0x%04X\n", sys_errors);
-        }
-
-        int8_t rssi_inst = 0;
-        if (lr11xx_radio_get_rssi_inst(&lr1121, &rssi_inst) == LR11XX_STATUS_OK) {
-            printf("[LORA] Instant RSSI: %d dBm\n", rssi_inst);
-        }
-
-        lr11xx_radio_rx_buffer_status_t rx_buffer_status;
-        if (lr11xx_radio_get_rx_buffer_status(&lr1121, &rx_buffer_status) == LR11XX_STATUS_OK) {
-            printf("[LORA] RX buffer after timeout: payload_len=%u start=%u\n", rx_buffer_status.pld_len_in_bytes, rx_buffer_status.buffer_start_pointer);
-            uint8_t dump_len = rx_buffer_status.pld_len_in_bytes > 32 ? 32 : rx_buffer_status.pld_len_in_bytes;
-            if (dump_len > 0) {
-                uint8_t tmp[32];
-                if (lr11xx_regmem_read_buffer8(&lr1121, tmp, rx_buffer_status.buffer_start_pointer, dump_len) == LR11XX_STATUS_OK) {
-                    printf("[LORA] RX dump: ");
-                    for (uint8_t i = 0; i < dump_len; i++) printf("%02X ", tmp[i]);
-                    printf("\n");
-                }
-            }
-        }
-        return false;
-    }
-    
-    if (!(irq_status & LR11XX_SYSTEM_IRQ_RX_DONE)) {
-        printf("[LORA] Unknown IRQ: 0x%08lX\n", (unsigned long)irq_status);
-        return false;
-    }
-    
-    // Get packet status for RSSI/SNR
+    // Extract the valid packet metadata
     lr11xx_radio_pkt_status_lora_t pkt_status;
-    ASSERT_LR11XX_RC(lr11xx_radio_get_lora_pkt_status(&lr1121, &pkt_status));
+    lr11xx_radio_get_lora_pkt_status(&lr1121, &pkt_status);
     
-    if (rssi != NULL) {
-        *rssi = pkt_status.rssi_pkt_in_dbm;
-    }
-    if (snr != NULL) {
-        *snr = pkt_status.snr_pkt_in_db;
-    }
+    if (rssi != NULL) *rssi = pkt_status.rssi_pkt_in_dbm;
+    if (snr != NULL)  *snr = pkt_status.snr_pkt_in_db;
     
-    // Get received data length
+    // Extract the valid packet payload
     lr11xx_radio_rx_buffer_status_t rx_buffer_status;
-    ASSERT_LR11XX_RC(lr11xx_radio_get_rx_buffer_status(&lr1121, &rx_buffer_status));
+    lr11xx_radio_get_rx_buffer_status(&lr1121, &rx_buffer_status);
     
     uint8_t payload_len = rx_buffer_status.pld_len_in_bytes;
+    
+    // Safeguard against buffer overflows
     if (payload_len > max_length) {
         printf("[LORA] Packet too large: %d > %d\n", payload_len, max_length);
         return false;
@@ -408,13 +304,12 @@ static bool lora_receive(uint8_t* buffer, uint8_t max_length, uint8_t* received_
     
     *received_length = payload_len;
     
-    // Read the payload
-    ASSERT_LR11XX_RC(lr11xx_regmem_read_buffer8(&lr1121, buffer, rx_buffer_status.buffer_start_pointer, payload_len));
+    // Read the payload from the radio silicon into the microcontroller's memory
+    lr11xx_regmem_read_buffer8(&lr1121, buffer, rx_buffer_status.buffer_start_pointer, payload_len);
     
     rx_count++;
     return true;
 }
-
 /**
  * @brief Parse and display GPS telemetry packet
  */
