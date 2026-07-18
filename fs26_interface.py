@@ -109,8 +109,10 @@ app_state = {
     'replay_rows': [],
     'replay_index': 0,
     'replay_paused': True,
-    'replay_speed': 1,
+    'replay_speed': 1.0,
     'replay_filename': None,
+    'replay_started_at': None,
+    'replay_base_timestamp': None,
 }
 state_lock = threading.Lock()
 
@@ -332,19 +334,30 @@ def replay_step():
     if app_state['mode'] != 'replay' or app_state['replay_paused'] or not app_state['replay_rows']:
         return
 
-    step = max(1, int(app_state['replay_speed']))
-    next_index = min(app_state['replay_index'] + step, len(app_state['replay_rows']))
-    if next_index <= app_state['replay_index']:
+    if app_state['replay_started_at'] is None or app_state['replay_base_timestamp'] is None:
+        reset_replay_clock()
+
+    rows = app_state['replay_rows']
+    if not rows:
         return
 
     if app_state['replay_index'] == 0:
         reset_telemetry_buffers()
 
-    for index in range(app_state['replay_index'], next_index):
-        apply_sample(app_state['replay_rows'][index], count_rx_total=False, append_to_buffer=True)
+    replay_speed = max(float(app_state['replay_speed']), 0.25)
+    elapsed_seconds = (time.monotonic() - app_state['replay_started_at']) * replay_speed
+    target_timestamp = app_state['replay_base_timestamp'] + elapsed_seconds
 
-    app_state['replay_index'] = next_index
-    if app_state['replay_index'] >= len(app_state['replay_rows']):
+    while app_state['replay_index'] < len(rows):
+        row = rows[app_state['replay_index']]
+        row_timestamp = row.get('timestamp')
+        if row_timestamp is None or row_timestamp <= target_timestamp:
+            apply_sample(row, count_rx_total=False, append_to_buffer=True)
+            app_state['replay_index'] += 1
+        else:
+            break
+
+    if app_state['replay_index'] >= len(rows):
         app_state['replay_paused'] = True
 
 def parse_serial_line(line):
@@ -498,12 +511,31 @@ def serial_reader():
 threading.Thread(target=serial_reader, daemon=True).start()
 
 
+def reset_replay_clock():
+    rows = app_state['replay_rows']
+    if not rows:
+        app_state['replay_started_at'] = None
+        app_state['replay_base_timestamp'] = None
+        return
+
+    index = max(0, min(app_state['replay_index'], len(rows)))
+    if index > 0:
+        current_row = rows[index - 1]
+    else:
+        current_row = rows[0]
+
+    timestamp = current_row.get('timestamp')
+    app_state['replay_base_timestamp'] = timestamp if timestamp is not None else 0.0
+    app_state['replay_started_at'] = time.monotonic()
+
+
 def control_text():
     if app_state['mode'] == 'replay' and app_state['replay_rows']:
         total = len(app_state['replay_rows'])
         position = min(app_state['replay_index'], total)
         state = 'Paused' if app_state['replay_paused'] else 'Playing'
-        return f"Replay {state} {position}/{total} at {app_state['replay_speed']}x"
+        speed_text = f"{app_state['replay_speed']:.2f}".rstrip('0').rstrip('.')
+        return f"Replay {state} {position}/{total} at {speed_text}x"
 
     if app_state['recording']:
         return f"Recording to {app_state['recording_path']}"
@@ -536,12 +568,13 @@ def start_replay(rows, filename=None):
     app_state['replay_rows'] = rows
     app_state['replay_index'] = 0
     app_state['replay_paused'] = True
-    app_state['replay_speed'] = 1
+    app_state['replay_speed'] = 1.0
     app_state['replay_filename'] = filename
     reset_telemetry_buffers()
     if rows:
         apply_sample(rows[0], count_rx_total=False, append_to_buffer=True)
         app_state['replay_index'] = 1
+    reset_replay_clock()
 
 
 def reset_replay_to_start():
@@ -554,6 +587,7 @@ def reset_replay_to_start():
     if app_state['replay_rows']:
         apply_sample(app_state['replay_rows'][0], count_rx_total=False, append_to_buffer=True)
         app_state['replay_index'] = 1
+    reset_replay_clock()
 
 # Dash App
 app = dash.Dash(__name__, update_title=None)
@@ -619,6 +653,7 @@ app.layout = html.Div([
             html.Button('Record to CSV', id='record-toggle', n_clicks=0, style=control_button_style),
             html.Button('Play', id='play-toggle', n_clicks=0, style=control_button_style),
             html.Button('Pause', id='pause-toggle', n_clicks=0, style=control_button_style),
+            html.Button('0.5x', id='slow-toggle', n_clicks=0, style=control_button_style),
             html.Button('Fast-forward', id='ff-toggle', n_clicks=0, style=control_button_style),
             html.Button('1x', id='reset-speed-toggle', n_clicks=0, style=control_button_style),
             html.Button('Live', id='live-toggle', n_clicks=0, style=control_button_style),
@@ -806,6 +841,7 @@ def update_dashboard(n):
     [Input('record-toggle', 'n_clicks'),
      Input('play-toggle', 'n_clicks'),
      Input('pause-toggle', 'n_clicks'),
+     Input('slow-toggle', 'n_clicks'),
      Input('ff-toggle', 'n_clicks'),
      Input('reset-speed-toggle', 'n_clicks'),
      Input('live-toggle', 'n_clicks'),
@@ -813,7 +849,7 @@ def update_dashboard(n):
     [State('replay-upload', 'filename')],
     prevent_initial_call=True
 )
-def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_speed_clicks, live_clicks, upload_contents, upload_filename):
+def handle_controls(record_clicks, play_clicks, pause_clicks, slow_clicks, ff_clicks, reset_speed_clicks, live_clicks, upload_contents, upload_filename):
     triggered = dash.callback_context.triggered[0]['prop_id'].split('.')[0]
 
     if triggered == 'record-toggle':
@@ -827,15 +863,22 @@ def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_s
                 reset_replay_to_start()
             else:
                 app_state['replay_paused'] = False
+                reset_replay_clock()
     elif triggered == 'pause-toggle':
         if app_state['mode'] == 'replay' and app_state['replay_rows']:
             app_state['replay_paused'] = not app_state['replay_paused']
+    elif triggered == 'slow-toggle':
+        if app_state['mode'] == 'replay' and app_state['replay_rows']:
+            app_state['replay_speed'] = max(app_state['replay_speed'] / 2, 0.25)
+            reset_replay_clock()
     elif triggered == 'ff-toggle':
         if app_state['mode'] == 'replay' and app_state['replay_rows']:
             app_state['replay_speed'] = min(app_state['replay_speed'] * 2, 16)
+            reset_replay_clock()
     elif triggered == 'reset-speed-toggle':
         if app_state['mode'] == 'replay' and app_state['replay_rows']:
-            app_state['replay_speed'] = 1
+            app_state['replay_speed'] = 1.0
+            reset_replay_clock()
     elif triggered == 'live-toggle':
         set_live_mode()
     elif triggered == 'replay-upload' and upload_contents:
@@ -845,7 +888,7 @@ def handle_controls(record_clicks, play_clicks, pause_clicks, ff_clicks, reset_s
     record_text = 'Stop recording' if app_state['recording'] else 'Record to CSV'
     play_text = 'Stop/Reset' if (app_state['mode'] == 'replay' and app_state['replay_rows'] and not app_state['replay_paused']) else 'Play'
     pause_text = 'Resume' if (app_state['mode'] == 'replay' and app_state['replay_paused']) else 'Pause'
-    speed_text = f"Speed: {app_state['replay_speed']}x"
+    speed_text = f"Speed: {app_state['replay_speed']:.2f}".rstrip('0').rstrip('.') + 'x'
     replay_text = control_text() if app_state['mode'] == 'replay' else 'No replay loaded'
 
     return record_text, play_text, pause_text, speed_text, replay_text
