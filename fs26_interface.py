@@ -116,7 +116,9 @@ app_state = {
 }
 state_lock = threading.Lock()
 
-MAX_GPS_JUMP_KM = 5.0
+MAX_GPS_JUMP_KM = 0.5
+MAX_RPM = 15000
+MAX_THROTTLE = 100.0
 
 
 def fmt_float(value, precision=1, suffix=''):
@@ -192,6 +194,14 @@ def gps_reading_is_plausible(lat, lon):
 
     return haversine_km(previous_lat, previous_lon, lat, lon) <= MAX_GPS_JUMP_KM
 
+def get_valid_reading(new_value, current_value, min_limit, max_limit):
+    """
+    Returns the new value if it falls within the acceptable limits.
+    Otherwise, ignores it and falls back to the previous valid reading.
+    """
+    if min_limit <= new_value <= max_limit:
+        return new_value
+    return current_value
 
 def ensure_recordings_dir():
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
@@ -400,8 +410,13 @@ def parse_serial_line(line):
         elif 'RPM:' in line and 'TPS:' in line:
             match = re.search(r'RPM:\s*(\d+)\s*\|\s*TPS:\s*([+-]?[0-9]*\.?[0-9]+)%\s*\|\s*Eng:\s*([+-]?[0-9]*\.?[0-9]+)\s*C\s*\|\s*Oil:\s*([+-]?[0-9]*\.?[0-9]+)\s*Bar', line)
             if match:
-                latest['rpm'] = int(match.group(1))
-                latest['tps'] = float(match.group(2))
+                raw_rpm = int(match.group(1))
+                raw_tps = float(match.group(2))
+                
+                # Apply limits to reject corrupted values and maintain the previous valid state
+                latest['rpm'] = get_valid_reading(raw_rpm, latest['rpm'], 0, MAX_RPM)
+                latest['tps'] = get_valid_reading(raw_tps, latest['tps'], 0.0, MAX_THROTTLE)
+                
                 latest['engine_temp'] = float(match.group(3))
                 latest['oil_pressure'] = float(match.group(4))
         elif 'Fuel:' in line and 'Brake:' in line:
@@ -671,13 +686,35 @@ app.layout = html.Div([
     ], style={'padding': '0.75rem 1rem 0 1rem', 'display': 'grid', 'gap': '0.5rem'}),
 
     html.Div([
-        dcc.Graph(id='map-graph', style={'height': '52vh'}),
-    ], style={'padding': '1rem'}),
-
-    html.Div([
-        dcc.Graph(id='speed-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
-        dcc.Graph(id='signal-graph', style={'height': '26vh', 'width': '50%', 'display': 'inline-block'}),
-    ], style={'padding': '0 1rem 1rem 1rem'}),
+        html.Div([
+            dcc.Graph(id='map-graph', style={'width': '100%', 'height': '100%', 'minHeight': '420px'}),
+        ], style={
+            'width': 'min(48vw, 640px)',
+            'maxWidth': '100%',
+            'minWidth': '320px',
+            'aspectRatio': '1 / 1',
+            'display': 'flex',
+            'alignItems': 'stretch',
+            'justifyContent': 'center',
+            'flexShrink': '0',
+        }),
+        html.Div([
+            html.Div([
+                dcc.Graph(id='speed-graph', style={'height': '100%', 'width': '100%'}),
+                dcc.Graph(id='signal-graph', style={'height': '100%', 'width': '100%'}),
+                dcc.Graph(id='rpm-graph', style={'height': '100%', 'width': '100%'}),
+                dcc.Graph(id='throttle-graph', style={'height': '100%', 'width': '100%'}),
+            ], style={
+                'display': 'grid',
+                'gridTemplateColumns': 'repeat(2, minmax(0, 1fr))',
+                'gridTemplateRows': 'repeat(2, minmax(0, 1fr))',
+                'gap': '1rem',
+                'height': 'calc(100vh - 320px)',
+                'minHeight': '520px',
+                'maxHeight': '720px',
+            }),
+        ], style={'flex': '1 1 0', 'minWidth': '320px', 'height': '100%'}),
+    ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'flex-start', 'gap': '1rem', 'padding': '1rem'}),
 
     dcc.Interval(id='interval-component', interval=250, n_intervals=0),
 ], style=page_style)
@@ -692,7 +729,9 @@ app.layout = html.Div([
      Output('dynamics-card', 'children'),
      Output('map-graph', 'figure'),
      Output('speed-graph', 'figure'),
-     Output('signal-graph', 'figure')],
+     Output('signal-graph', 'figure'),
+     Output('rpm-graph', 'figure'),
+     Output('throttle-graph', 'figure')],
     [Input('interval-component', 'n_intervals')]
 )
 def update_dashboard(n):
@@ -828,8 +867,44 @@ def update_dashboard(n):
         legend=dict(orientation='h', yanchor='top', y=1.1, x=0.5, xanchor='center'),
         uirevision='constant',
     )
+
+    # RPM graph
+    rpm_fig = go.Figure(go.Scatter(
+        y=list(telemetry_data['rpm']),
+        mode='lines',
+        fill='tozeroy',
+        line=dict(color='#ffd166', width=2),
+        fillcolor='rgba(255,209,102,0.2)',
+    ))
+    rpm_fig.update_layout(
+        title=None,
+        template='plotly_dark',
+        paper_bgcolor='#0f0f23',
+        plot_bgcolor='#16213e',
+        yaxis_title='RPM',
+        margin=dict(l=50, r=20, t=20, b=30),
+        uirevision='constant',
+    )
+
+    # Throttle graph
+    throttle_fig = go.Figure(go.Scatter(
+        y=list(telemetry_data['tps']),
+        mode='lines',
+        fill='tozeroy',
+        line=dict(color='#ff8fab', width=2),
+        fillcolor='rgba(255,143,171,0.2)',
+    ))
+    throttle_fig.update_layout(
+        title=None,
+        template='plotly_dark',
+        paper_bgcolor='#0f0f23',
+        plot_bgcolor='#16213e',
+        yaxis_title='Throttle (%)',
+        margin=dict(l=50, r=20, t=20, b=30),
+        uirevision='constant',
+    )
     
-    return status, connection_card, gps_card, engine_card, pressure_card, wheel_card, dynamics_card, map_fig, speed_fig, signal_fig
+    return status, connection_card, gps_card, engine_card, pressure_card, wheel_card, dynamics_card, map_fig, speed_fig, signal_fig, rpm_fig, throttle_fig
 
 
 @app.callback(
