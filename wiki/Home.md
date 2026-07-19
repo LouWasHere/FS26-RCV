@@ -7,6 +7,7 @@ This wiki is a short guide to the receiver side of the FS26 telemetry stack.
 - [Telemetry packet format](Telemetry-Packet-Format.md)
 - [C receiver code](C-Receiver-Code.md)
 - [Python web interface](Python-Web-Interface.md)
+- [Hardware setup](Hardware-Construction.md)
 
 ## What lives where
 

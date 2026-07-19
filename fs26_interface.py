@@ -194,6 +194,7 @@ def gps_reading_is_plausible(lat, lon):
 
     return haversine_km(previous_lat, previous_lon, lat, lon) <= MAX_GPS_JUMP_KM
 
+
 def get_valid_reading(new_value, current_value, min_limit, max_limit):
     """
     Returns the new value if it falls within the acceptable limits.
